@@ -3,7 +3,7 @@
 基准（baseline）数据的同步与计算框架：从数据源取基准标的行情，按等权 / 市值加权规则合成基准指数，
 再以**多表结构**写入本地 warehouse（DuckDB / SQLite）。
 
-> **当前状态**：`v0.1.0` — **仅完成目录骨架与配置**，`src/`、`scripts/`、`tests/` 下全部为占位文件
+> **当前状态**：`v0.1.0` — **仅完成目录骨架与配置**，`src/`、`scripts/`、`tests/` 下全部为占位文件 **Under Development**
 > （只有 docstring + TODO），业务逻辑尚未实现。表结构的权威定义见 [docs/db_schema.md](docs/db_schema.md)。
 
 ---
