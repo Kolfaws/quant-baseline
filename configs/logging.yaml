@@ -1,0 +1,95 @@
+# =============================================================================
+# logging.yaml — 日志格式与级别（Python logging.config.dictConfig 格式）
+#
+# 加载方式（src/quant_baseline/core/logger.py）：
+#   1. 读取本文件，展开 ${VAR:-默认值} 占位符
+#   2. 创建 handler 引用的目录（相对路径按“项目根目录”解析，不是 cwd）
+#   3. logging.config.dictConfig(...)
+#
+# 注意：handler 使用 delay=true（首次写入才打开文件），所以第 2 步必须在
+#       第 3 步之前完成，否则目录缺失会导致日志静默丢失。
+#
+# 级别：DEBUG / INFO / WARNING / ERROR / CRITICAL
+#   - 控制台级别由 LOG_LEVEL 控制（默认 INFO）
+#   - 文件始终记录 DEBUG，便于事后排查，按大小滚动
+# =============================================================================
+
+version: 1
+disable_existing_loggers: false
+
+# ------------------------------------------------------------------ 格式 --
+formatters:
+  # 控制台：紧凑单行，便于肉眼扫读
+  console:
+    format: "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s - %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+
+  # 文件：带进程/线程与行号，便于定位
+  detailed:
+    format: "%(asctime)s | %(levelname)-8s | %(process)d:%(threadName)s | %(name)s:%(funcName)s:%(lineno)d - %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+
+  # 错误文件：单行摘要；异常栈由 logging 自动追加，便于 grep
+  error:
+    format: "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+
+# ------------------------------------------------------------------ 输出 --
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: "${LOG_LEVEL:-INFO}"
+    formatter: console
+    stream: ext://sys.stderr
+
+  # 全量日志：10MB × 7 份滚动
+  file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: "${LOG_DIR:-logs}/baseline.log"
+    maxBytes: 10485760
+    backupCount: 7
+    encoding: utf-8
+    delay: true
+
+  # 错误日志：单独一份，便于告警接入
+  error_file:
+    class: logging.handlers.RotatingFileHandler
+    level: ERROR
+    formatter: error
+    filename: "${LOG_DIR:-logs}/baseline.error.log"
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf-8
+    delay: true
+
+# ------------------------------------------------------------------ 记录器 --
+loggers:
+  # 本项目包：输出到全部 handler
+  quant_baseline:
+    level: DEBUG
+    handlers: [console, file, error_file]
+    propagate: false
+
+  # 第三方库降噪，避免 DEBUG 刷屏
+  duckdb:
+    level: WARNING
+    handlers: [console]
+    propagate: false
+  urllib3:
+    level: WARNING
+    handlers: [console]
+    propagate: false
+  requests:
+    level: WARNING
+    handlers: [console]
+    propagate: false
+  httpx:
+    level: WARNING
+    handlers: [console]
+    propagate: false
+
+root:
+  level: WARNING
+  handlers: [console, file, error_file]

@@ -1,0 +1,124 @@
+# =============================================================================
+# baseline.yaml — 基准标的池配置
+#
+# 三个层次：
+#   universes   标的池：成分列表 + 每只成分的生效区间（静态列表 或 动态成分源）
+#   benchmarks  基准：自建合成基准（等权/市值加权）或直接跟踪的外部指数/ETF
+#   sync        同步行为：日期区间、增量回看、重试、限流
+#
+# 通用约定：
+#   - 日期一律 "YYYY-MM-DD"；区间左闭右闭；end 为 null 表示“至今”
+#   - 代码统一为 "<6位数字>.<交易所>"，如 600519.SH、000001.SZ、430047.BJ
+#   - code（UNI_* / BI_*）是项目内部稳定标识，入库后不可随意改名
+#   - 由 src/quant_baseline/core/config.py 用 Pydantic 严格校验：未知字段直接报错
+# =============================================================================
+
+version: 1
+
+# ------------------------------------------------------------------ 全局默认 --
+# 各 benchmark / universe 可局部覆盖，未覆盖时继承此处
+defaults:
+  source: tushare            # 默认数据源：tushare | akshare
+  calendar: SSE              # 交易日历：SSE（上交所）/ SZSE（深交所）
+  price_field: close         # close | open | vwap
+  adjust: none               # none | qfq（前复权）| hfq（后复权）
+  missing_policy: drop       # drop | forward_fill —— 停牌/缺失的处理方式
+  base_date: "2015-01-05"    # 基准日
+  base_value: 1000.0         # 基准日点位
+  rebalance:
+    frequency: monthly       # daily | weekly | monthly | quarterly | none
+    align: first_trading_day # first_trading_day | last_trading_day
+  weight:
+    method: equal            # equal | market_cap | fixed
+
+# ------------------------------------------------------------------ 标的池 --
+universes:
+  # 静态成分：直接在 members 中维护，适合自选股池 / 行业样本 / 策略基准池
+  - code: UNI_CN_A_CORE
+    name: A股核心池（示例）
+    description: 仅用于打通流程的示例标的池，请替换为真实标的
+    members:
+      - { symbol: 600519.SH, name: 贵州茅台, start: "2015-01-05", end: null }
+      - { symbol: 000858.SZ, name: 五粮液,   start: "2015-01-05", end: null }
+      - { symbol: 600036.SH, name: 招商银行, start: "2015-01-05", end: null }
+      - { symbol: 000001.SZ, name: 平安银行, start: "2015-01-05", end: null }
+      - { symbol: 601318.SH, name: 中国平安, start: "2015-01-05", end: null }
+
+  # 动态成分：members 留空，由 constituents_source 定期刷新成分快照
+  - code: UNI_HS300
+    name: 沪深300 成分
+    members: []
+    constituents_source:
+      kind: tushare          # 与 defaults.source 无关，此处单独指定
+      api: index_weight      # tushare: index_weight
+      index_code: 000300.SH
+      refresh: monthly       # 成分快照刷新频率：daily | weekly | monthly | quarterly
+      lookback_days: 30      # 取最近 N 个自然日内最近一期成分
+
+# ------------------------------------------------------------------ 基准 --
+benchmarks:
+  # 1) 外部指数：直接使用指数自身点位，不做加权计算
+  - code: BI_HS300
+    name: 沪深300
+    kind: external
+    category: index
+    symbol: 000300.SH
+    source: tushare
+    price_field: close
+
+  # 2) 外部 ETF：用二级市场收盘价构建净值序列（ETF 默认不复权）
+  - code: BI_HS300_ETF
+    name: 华泰柏瑞沪深300ETF
+    kind: external
+    category: etf
+    symbol: 510300.SH
+    source: tushare
+    price_field: close
+    adjust: none
+
+  # 3) 自建等权基准：等权买入 + 定期再平衡
+  - code: BI_EQW_CORE
+    name: 核心池等权
+    kind: synthetic
+    universe: UNI_CN_A_CORE
+    weight:
+      method: equal
+    rebalance:
+      frequency: monthly
+      align: first_trading_day
+    base_date: "2015-01-05"
+    base_value: 1000.0
+    price_field: close
+
+  # 4) 自建市值加权基准：用 T-1 市值定权，避免用当日收盘市值造成前视偏差
+  - code: BI_MCW_CORE
+    name: 核心池市值加权
+    kind: synthetic
+    universe: UNI_CN_A_CORE
+    weight:
+      method: market_cap
+      field: total_mv        # total_mv（总市值）| circ_mv（流通市值）
+      lag: 1                 # 1 = 用 T-1 收盘市值；0 = 用当日（不推荐）
+    rebalance:
+      frequency: monthly
+      align: first_trading_day
+    base_date: "2015-01-05"
+    base_value: 1000.0
+
+# ------------------------------------------------------------------ 同步 --
+sync:
+  start_date: "2015-01-01"       # 首次回补起点
+  end_date: null                 # null = 同步至最新交易日
+  incremental_lookback_days: 5   # 每次增量向前重叠 N 天，覆盖数据修订 / 补发
+  chunk_days: 365                # 单次接口请求的最大自然日跨度（避免超时）
+  trade_calendar: SSE            # 用于判断“当天是否为交易日”
+  write_mode: upsert             # upsert（幂等，默认）| append（只追加）
+
+  retry:
+    attempts: 3
+    backoff_seconds: 2.0         # 首次重试等待秒数
+    backoff_multiplier: 2.0      # 指数退避倍数：2s → 4s → 8s
+
+  rate_limit:
+    calls_per_minute: 200        # 依 tushare 积分档位调整；akshare 可设 60
+    min_interval_seconds: 0.05   # 两次请求的最小间隔
