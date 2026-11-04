@@ -159,18 +159,27 @@ make lint        # ruff check
 
 ```bash
 make install       # 安装依赖
+make hooks         # 安装 git 钩子（首次克隆后必做，否则提交时不会跑任何检查）
 make lint          # ruff check
 make format        # ruff format（会改动文件）
 make test          # pytest（含覆盖率）
 make pre-commit    # 全量跑 pre-commit
 ```
 
+> **注意**：`.pre-commit-config.yaml` 只是“配置”，真正的钩子要写到 `.git/hooks/pre-commit`。
+> 新克隆的仓库不执行 `pre-commit install` 时，`git commit` 不会有任何检查，也不报错。
+> 等价于 `pre-commit install`；装完后可用 `pre-commit run --all-files` 做一次全量体检。
+
 约定：
 
 - 代码用 `ruff` 检查与格式化（line-length 88），提交前由 pre-commit 自动执行；
+- 默认分支受保护（`no-commit-to-branch` 拦截 `main` / `master`），请先 `git switch -c dev` 再提交；
 - 业务代码统一 `logger = get_logger(__name__)`，不直接 `print`；
 - 新增字段/表必须先改 [docs/db_schema.md](docs/db_schema.md)，再改代码；
 - 测试只用内存库与 `tmp_path`，不读写 `warehouse/baseline.db`，需要外网的用例打 `@pytest.mark.network`。
+- 文本文件一律 UTF-8 无 BOM：PowerShell 的 `>` / `Out-File` 默认写 UTF-16LE，
+  会让 git 把文件判定为二进制（diff 失效、`.gitattributes` 的换行规则也会失效），
+  生成 `requirements.txt` 之类文件请用 `... | Out-File -Encoding utf8` 或 `python -c`。
 
 ---
 

@@ -26,7 +26,7 @@ CHUNK_DAYS ?= 365
 DATE ?=
 PYTEST_ARGS ?=
 
-.PHONY: help install install-pip lint format test test-cov pre-commit \
+.PHONY: help install install-pip hooks lint format test test-cov pre-commit \
         init check sync backfill build clean
 
 help:
@@ -37,6 +37,7 @@ help:
 	@echo "环境:"
 	@echo "  install        安装运行与开发依赖 (uv sync --extra dev)"
 	@echo "  install-pip    使用当前环境可编辑安装 (pip install -e .[dev])"
+	@echo "  hooks          安装 git 钩子（首次克隆必做）"
 	@echo "  build          构建 sdist + wheel (uv build)"
 	@echo ""
 	@echo "质量:"
@@ -61,6 +62,10 @@ install:
 
 install-pip:
 	python -m pip install -e ".[dev]"
+
+# 把 .pre-commit-config.yaml 落到 .git/hooks/pre-commit（新克隆后必跑一次）
+hooks:
+	$(PYTHON) -m pre_commit install
 
 lint:
 	$(RUFF) check .
