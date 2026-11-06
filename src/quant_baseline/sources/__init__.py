@@ -1,14 +1,11 @@
-"""sources — 数据源获取层。
+"""sources — 从统一数据底座读取数据。
 
-本层只负责“把外部数据变成规整的 DataFrame”，不做清洗、不做加权、不落库。
-异常统一转换为 FetchError。
+本层只读 market.duckdb，不联网、不抓行情：
 
-子模块:
-    base.py             AbstractSource —— 所有数据源的统一契约
-    tushare_source.py   主数据源：指数 / ETF 日线、个股日线、指数权重、交易日历
-    akshare_source.py   备选数据源：tushare 不可用或积分不足时降级使用
-
-依赖方向: sources 只能依赖 core，不能 import processors / sinks。
+    warehouse_source.WarehouseSource
+        交易日历 / 个股（含市值、复权因子）/ 指数 / ETF / 指数成分权重
 """
 
-__all__: list[str] = []
+from .warehouse_source import WarehouseSource
+
+__all__ = ["WarehouseSource"]

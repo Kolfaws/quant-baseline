@@ -1,150 +1,202 @@
 # Quant Baseline
 
-量化回测基准（Baseline）数据的同步与计算框架。从数据源拉取基准标的（指数/ETF/成分股）行情，按等权或市值加权规则合成合成基准，并以多表结构落库至本地 Warehouse（默认 DuckDB / 备选 SQLite）。
+回测基准（benchmark）计算组件：从统一数据底座读行情，按等权 / 市值加权 / 外部指数
+规则合成基准，产出直接写入 `backtest.duckdb`。
 
-> **当前状态 (`v0.1.0`)**：骨架与配置阶段。`configs/`、`pyproject.toml` 和文档已就绪，`src/`、`scripts/`、`tests/` 下均为占位文件（含 docstring 与 TODO）。各项业务逻辑尚待实现，表结构的权威定义请以 `docs/db_schema.md` 为准。
+> **本项目是纯计算组件。**
+> 不抓行情、不建表、不创建独立 `baseline.db`、不提供 SQLite 备选。
+> 底层数据由 `data_pipeline` 写入 `market.duckdb`；表结构由 `quant-backtest-engine`
+> 的 `init_backtest_db.py` 拥有；本项目的产出 upsert 到 `bt_benchmarks` /
+> `bt_baselines` / `bt_baseline_weights` / `bt_compute_log`。
 
-## 1. 设计目标
-
-Baseline是评价量化回测结果的重要参考。这个项目的目标很简单：
-
-- **可复现**：相同参数重跑，数据逐位一致，不引入前视偏差。
-- **可追溯**：某天基准用了什么成分、权重怎么调的，可查询。
-- **配置驱动**：换标的池、换加权方式、换数据源，不改动上下游的 Pipeline 代码。
-
-整体数据流向：
+## 1. 数据流
 
 ```text
-configs/*.yaml  →  sources（取数）  →  processors（清洗/复权/加权）  →  sinks（多表落库）
+data_pipeline ──写──> ${MARKET_DB_PATH}（warehouse + factor）
+                              │ 只读
+                              ▼
+quant-baseline    读取交易日历 / 个股 / 指数 / ETF / 指数成分
+                  清洗 → 收益口径 → 等权/市值加权 → 点位与权重漂移
+                              │ upsert
+                              ▼
+quant-backtest-engine 建表 ─> ${BACKTEST_DB_PATH}
+                  读回基准，与策略净值在 SQL 层算超额
 ```
 
-## 2. 目录结构
+关键点：
+
+- **单一数据底座**：`market.duckdb` + `backtest.duckdb`，没有第三个库。
+- **读写隔离**：`market.duckdb` 以 `read_only=True` 打开；factor_research 写因子时，
+  回测/基准仍可并发读（DuckDB 单写多读）。
+- **不重复抓数**：基准用的指数、成分、个股价量都已在 market 库中；抓数由
+  `data_pipeline/scripts/ingest_market_data.py` 负责。
+- **口径可复现**：同一配置重跑，逐位一致；再平衡目标权重只用 `T-lag` 及更早数据。
+
+## 2. 目录
 
 ```text
 quant-baseline/
-├── configs/                      # 配置中心
-│   ├── baseline.yaml             # 标的池 (universes)、基准定义 (benchmarks)、同步控制
-│   ├── database.yaml             # warehouse 连接配置与写入约定
-│   └── logging.yaml              # 日志配置 (dictConfig)
-├── data/                         # 数据中转（不进版本库）
-│   ├── raw/
-│   └── processed/
+├── configs/
+│   ├── baseline.yaml             # 标的池 / 基准规则 / 同步区间
+│   ├── database.yaml             # market + backtest 路径、sink 约定
+│   └── logging.yaml
 ├── docs/
-│   ├── db_schema.md              # Warehouse 多表结构定义（唯一权威）
-│   └── api_reference.md          # 核心类契约
-├── scripts/                      # 调度入口（独立执行）
-│   ├── init_warehouse.py         # 建表 / 索引 / 结构校验
-│   ├── sync_baseline.py          # 日常增量同步
-│   └── backfill_history.py       # 历史回补
+│   ├── db_schema.md              # 本项目在 backtest.duckdb 中读写的表
+│   └── api_reference.md          # 已实现 API
+├── scripts/
+│   ├── sync_baseline.py          # 日常增量（首次自动全量）
+│   ├── backfill_history.py       # 历史分片回补
+│   └── check_connections.py      # 只读检查两库结构/版本
 ├── src/quant_baseline/
-│   ├── core/                     # config, logger, exceptions
-│   ├── sources/                  # base, tushare, akshare
-│   ├── processors/               # cleaner, adjuster, weight_calc (等权/市值加权)
-│   ├── sinks/                    # base, warehouse_sink (upsert)
-│   └── pipeline.py               # Source → Processor → Sink 串联
-├── tests/                        # 内存库 + Mock 数据测试
-└── warehouse/                    # 新数据仓库 (baseline.db, 已 gitignore)
+│   ├── core/                     # config / db / logger / exceptions
+│   ├── sources/warehouse_source.py
+│   ├── processors/               # cleaner / adjuster / weight_calc
+│   ├── sinks/backtest_sink.py
+│   └── pipeline.py
+└── tests/                        # 纯函数 + 临时库端到端
 ```
 
-## 3. 快速开始
+## 3. 安装
 
-### 3.1 安装
-
-推荐使用 `uv`（见 `pyproject.toml`）：
+> 依赖只装必要的：`data_pipeline`、`quant-db-schema`（dist 名，包名 `quant_schema`）、`duckdb`、`polars`、`pyarrow`、`pytz`、`pyyaml`。
+> 不修改 `pyproject.toml` 的依赖段时，可直接用 `uv add` 注入：
 
 ```bash
-uv sync --extra dev
+cd quant-baseline
+uv add --editable ../quant-db-schema
+uv add --editable ../quant-data-pipeline
+uv add duckdb polars pyarrow pytz pyyaml
+uv sync
 ```
 
-或者用传统的 pip：
+> 如果目录名不同，按磁盘实际路径调整 `--editable` 参数。
 
-```bash
-pip install -e ".[dev]"
-# 需要备选数据源时安装 akshare
-pip install -e ".[dev,akshare]"
-```
+本项目采用 `src/` 布局，`uv sync` 会以 editable 方式安装 `quant_baseline`；
+测试通过 `pyproject.toml` 的 `pythonpath = ["src"]` 解析包，不使用
+`sys.path.insert`。
 
-要求 Python >= 3.10。
+## 4. 配置
 
-### 3.2 环境与初始化
+### 环境变量
 
 ```bash
 cp .env.example .env
-# 填入 TUSHARE_TOKEN 等必要凭证，数据库默认走本地 warehouse/baseline.db
-
-# 初始化表结构
-python scripts/init_warehouse.py --profile local
-
-# 仅校验结构，不建表
-python scripts/init_warehouse.py --check
+# 在 .env 中填写本机绝对路径；.env 已被 gitignore
+MARKET_DB_PATH=/absolute/path/to/market.duckdb
+BACKTEST_DB_PATH=/absolute/path/to/backtest.duckdb
 ```
-
-### 3.3 数据同步
-
-```bash
-# 日常增量（建议收盘后跑）
-python scripts/sync_baseline.py
-
-# 指定基准或日期
-python scripts/sync_baseline.py --benchmark BI_HS300 --date 20241101
-
-# 历史回补（支持断点续跑）
-python scripts/backfill_history.py --all --start 2015-01-01 --end 2024-12-31
-```
-
-提供了 `Makefile` 快捷命令：`make install` / `make init` / `make sync` / `make backfill` / `make test` / `make lint`。
-
-## 4. 配置说明
-
-### `configs/baseline.yaml`
-
-分三层：`universes`（标的池）、`benchmarks`（基准规则）、`sync`（同步行为）。
-基准支持两种形态：
-
-- `kind: external`：直接跟踪指数（如 `000300.SH`）或 ETF（如 `510300.SH`），不做合成。
-- `kind: synthetic`：由标的池按 `equal` / `market_cap` / `fixed` 加权合成，需指定 `base_date` 和 `base_value`。
 
 ### `configs/database.yaml`
 
-- `active_profile` 决定连接：`local`（读写 DuckDB）、`remote`（只读远端）、`sqlite`（备选）。
-- 敏感信息（如 DB 密码）用 `${ENV_VAR}` 占位，绝不写进 YAML。
-- `sink` 段定义了批大小、upsert 模式、幂等键。**注意：`conflict_keys` 必须与 `docs/db_schema.md` 中的主键保持一致。**
-
-## 5. 开发规范 (务必看)
-
-```bash
-make install       # 安装依赖
-make hooks         # 安装 git 钩子（首次克隆必做）
-make lint          # 跑 ruff
-make format        # 格式化代码
-make test          # 跑 pytest
+```yaml
+active_profile: production
+profiles:
+  production:
+    market_db_path: "${MARKET_DB_PATH}"
+    backtest_db_path: "${BACKTEST_DB_PATH}"
+    market_read_only: true
+    threads: 6
+    memory_limit: 6GB
+sink:
+  table: "bt_baselines"
+  conflict_keys: ["benchmark_id", "trade_date"]
+  batch_size: 10000
 ```
 
-**几条硬性约定：**
+- `market_read_only` 必须为 `true`；设成 false 会直接 `ConfigError`。
+- `sink.conflict_keys` 必须与 `bt_baselines` 主键一致，否则启动即失败。
+- 路径不允许写死；必须由 `${MARKET_DB_PATH}` / `${BACKTEST_DB_PATH}` 提供（环境变量优先于 `.env`）。
 
-1. **钩子必须装**：`.pre-commit-config.yaml` 只是配置，不执行 `make hooks` 或 `pre-commit install`，提交时啥都不会检查。
-2. **分支保护**：默认分支受保护，直接往 `main/master` 提交会被拦截。请先切出 `dev` 分支再开发。
-3. **日志规范**：一律使用 `logger = get_logger(__name__)`，别用 `print`。
-4. **Schema 先行**：加字段、加表，先改 `docs/db_schema.md` 评审，然后再动代码。
-5. **测试隔离**：测试代码不允许读写 `warehouse/baseline.db`，必须用内存库和 `tmp_path`。依赖外网的测试记得打 `@pytest.mark.network`。
-6. **Windows 编码坑**：用 PowerShell 生成 `requirements.txt` 之类的文件时，用 `Out-File -Encoding utf8` 或 python 脚本。默认的 `>` 会写出带 BOM 的 UTF-16LE，会导致 git 误判为二进制文件，换行符处理也会跟着崩掉。
+### `configs/baseline.yaml`
 
-## 6. 当前实现进度
+- `defaults`：日历、收益口径、基日/基点、再平衡频率、加权方法、warmup。
+- `universes`：
+  - 静态：`members` 带 `start`/`end`；
+  - 动态：`constituents_source` 指向 market 库的 `fact_index_weight`，不联网。
+- `benchmarks`：
+  - `kind: external` + `symbol`（指数/ETF）；
+  - `kind: synthetic` + `universe`。
+- `enabled: false` 的基准不会进入 `run_all`，但可手工指定运行。
 
-- [x] 目录与配置（`configs/`、`pyproject.toml`、pre-commit）
-- [x] 表结构文档 `docs/db_schema.md` (草案 v0.1.0)
-- [ ] `core/` (仅 docstring + TODO)
-- [ ] `sources/` (接口已定义，实现待补)
-- [ ] `processors/` (加权算法口径待定稿)
-- [ ] `sinks/` (upsert 逻辑待补)
-- [ ] `pipeline.py` 主流程串联
-- [ ] `scripts/` CLI 参数解析
-- [ ] `tests/` 用例编写
+当前仓库附带：
 
-## 7. 相关文档
+| 基准 | 类型 | 状态 | 依赖数据 |
+| --- | --- | --- | --- |
+| `BI_HS300` | external index | 启用 | `fact_index_daily` |
+| `BI_EQW_CORE` | synthetic equal | 启用 | `fact_daily` |
+| `BI_MCW_CORE` | synthetic market_cap | 停用 | `fact_daily_basic` |
+| `BI_HS300_ETF` | external etf | 停用 | `fact_fund_daily` |
+| `BI_EQW_HS300` | synthetic dynamic | 停用 | `fact_index_weight` |
 
-- `docs/db_schema.md`：字段定义、主键、索引、写入与迁移约定。
-- `docs/api_reference.md`：各层类方法的签名、返回值与异常。
+停用的基准不是“没实现”，而是当前 market 库尚未导入对应数据；导入后把
+`enabled` 改为 `true` 即可。
 
----
-END OF FILE
+## 5. 使用
+
+```bash
+# 首次/日常：没有历史则从 sync.start_date 全量，有历史则回看 5 天
+uv run python scripts/sync_baseline.py
+
+# 指定基准
+uv run python scripts/sync_baseline.py --benchmark BI_HS300
+
+# 历史回补（按 365 天分片，幂等，可断点重跑）
+uv run python scripts/backfill_history.py --all --start 2015-01-05 --end 2026-11-06
+
+# 只检查两个库的结构/版本/行数，不写库
+uv run python scripts/check_connections.py
+```
+
+Makefile：`make sync` / `make backfill START=... END=...` / `make check` / `make test`。
+
+## 6. 计算口径
+
+### 6.1 收益
+
+- `adjust: pct_chg`（默认）：用行情表的涨跌幅；Tushare 的 `pre_close` 已除权，
+  因此不依赖 `fact_adj_factor` 也能近似总收益。
+- `hfq` / `qfq`：`close * adj_factor`（或除以最新因子）后取环比。
+- `none`：原始收盘价环比。
+
+### 6.2 合成基准
+
+1. `base_date` 当日点位 = `base_value`（严格相等），当日收益记 0。
+2. 再平衡日目标权重：
+   - `equal`：等权，剔除无行情的成分；
+   - `market_cap`：用 `T-lag` 市值归一（默认 lag=1，避免前视）；
+   - `fixed`：用成员/指数权重归一。
+3. 非再平衡日权重随价格漂移：
+   `w_i(t) = w_i(t-1) * (1 + r_i(t)) / Σ_j w_j(t-1) * (1 + r_j(t))`。
+4. 停牌/缺失：当日收益按 0，权重保留；不填充价格。
+5. 成分进出池：成员集合变化当日强制再平衡。
+6. 每日 `Σw = 1`（容差 1e-9），否则 `ProcessError`，不写库。
+
+### 6.3 外部基准
+
+- 指数：`close` 直接用指数点位；`nav = close / base_close`。
+- ETF：同一逻辑，数据来自 `fact_fund_daily`。
+- `bt_baselines.base_date` 存**实际**基准日（配置 base_date 之后的首个交易日）。
+
+## 7. 产出表
+
+本项目**不建表**，只写 backtest.duckdb：
+
+| 表 | 主键 | 说明 |
+| --- | --- | --- |
+| `bt_benchmarks` | `benchmark_id` | 配置物化 |
+| `bt_baselines` | `(benchmark_id, trade_date)` | 点位/净值 |
+| `bt_baseline_weights` | `(benchmark_id, trade_date, symbol)` | 每日权重 |
+| `bt_compute_log` | `run_id` | 成功/失败日志 |
+
+失败时也会写一条 `status='failed'` 的 `bt_compute_log`，异常继续上抛。
+详见 [docs/db_schema.md](docs/db_schema.md)。
+
+## 8. 测试
+
+```bash
+uv run --with pytest pytest tests -q
+```
+
+- 纯函数用例：等权/市值加权、T-1 市值、月度再平衡、成分进出、停牌、外部基准；
+- 写入用例：upsert 幂等、批大小、严格列校验、不可写表拒绝；
+- 端到端：临时 market/backtest 库，跑 `BaselinePipeline.run()`。

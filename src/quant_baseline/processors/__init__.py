@@ -1,14 +1,28 @@
-"""processors — 数据处理层。
+"""processors — 纯计算层（polars）。
 
-输入是 sources 产出的原始 DataFrame，输出是可以直接落库的规整 DataFrame。
-本层不做网络请求、不建数据库连接。
+    cleaner.py      行情清洗、去重、类型规整
+    adjuster.py     收益率口径（pct_chg / hfq / qfq / none）
+    weight_calc.py  等权 / 市值加权 / 固定权重；合成基准点位与权重漂移
 
-子模块:
-    cleaner.py      去重、缺失值、异常值、类型规整、停牌标记
-    adjuster.py     前/后复权计算、交易日历对齐
-    weight_calc.py  等权 / 市值加权基准的计算（本层核心）
-
-依赖方向: processors 可依赖 core 与 sources 的返回类型，但不能被 sources 依赖。
+不查库、不写库、不联网。
 """
 
-__all__: list[str] = []
+from .adjuster import compute_returns
+from .cleaner import clean_daily
+from .weight_calc import (
+    MembershipSnapshot,
+    MembershipTimeline,
+    build_external_series,
+    build_panel,
+    build_synthetic_benchmark,
+)
+
+__all__ = [
+    "MembershipSnapshot",
+    "MembershipTimeline",
+    "build_external_series",
+    "build_panel",
+    "build_synthetic_benchmark",
+    "clean_daily",
+    "compute_returns",
+]

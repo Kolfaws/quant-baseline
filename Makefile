@@ -1,24 +1,19 @@
 # =============================================================================
-# Quant Baseline — 常用开发与数据仓库命令
+# Quant Baseline — 常用命令
 #
-# 默认使用 uv（项目由 uv 初始化，见 .python-version / pyproject.toml）：
-#   make install
-#   make test
-#
-# 若已激活自己的 Python 环境（如 conda），可关闭 uv 运行器：
-#   make RUN= test
+# 本项目是纯计算组件：不建表、不抓行情。
+# 默认使用 uv；若已激活自己的 Python 环境，可用 make RUN= test。
 # =============================================================================
 
 .DEFAULT_GOAL := help
 
 UV ?= uv
-RUN ?= $(UV) run --extra dev
+RUN ?= $(UV) run
 PYTHON ?= $(RUN) python
-PYTEST ?= $(PYTHON) -m pytest
-RUFF ?= $(PYTHON) -m ruff
+PYTEST ?= $(UV) run --with pytest python -m pytest
+RUFF ?= $(UV) run --with ruff ruff
 
-# 常用可覆盖参数
-PROFILE ?= local
+PROFILE ?=
 BENCHMARK ?=
 START ?=
 END ?=
@@ -27,7 +22,7 @@ DATE ?=
 PYTEST_ARGS ?=
 
 .PHONY: help install install-pip hooks lint format test test-cov pre-commit \
-        init check sync backfill build clean
+        check sync backfill build clean
 
 help:
 	@echo "Quant Baseline"
@@ -37,33 +32,28 @@ help:
 	@echo "环境:"
 	@echo "  install        安装运行与开发依赖 (uv sync --extra dev)"
 	@echo "  install-pip    使用当前环境可编辑安装 (pip install -e .[dev])"
-	@echo "  hooks          安装 git 钩子（首次克隆必做）"
+	@echo "  hooks          安装 git 钩子"
 	@echo "  build          构建 sdist + wheel (uv build)"
 	@echo ""
 	@echo "质量:"
 	@echo "  lint           ruff check"
-	@echo "  format         ruff format（会修改文件）"
+	@echo "  format         ruff format"
 	@echo "  test           运行全部测试"
 	@echo "  test-cov       运行测试并输出覆盖率"
 	@echo "  pre-commit     运行全部 pre-commit 钩子"
 	@echo ""
-	@echo "数据仓库:"
-	@echo "  init           初始化 warehouse 表结构"
-	@echo "  check          校验 warehouse 结构"
-	@echo "  sync           增量同步基准数据"
-	@echo "  backfill       历史回补（需指定 START/END）"
-	@echo ""
+	@echo "数据:"
+	@echo "  check          只读检查 market / backtest 两库结构"
+	@echo "  sync           增量同步基准（首次自动全量）"
+	@echo "  backfill       历史回补（需 START/END）"
 	@echo "  clean          清理缓存与构建产物"
-	@echo ""
-	@echo "当前: PROFILE=$(PROFILE) CHUNK_DAYS=$(CHUNK_DAYS)"
 
 install:
-	$(UV) sync --extra dev
+	$(UV) sync
 
 install-pip:
 	python -m pip install -e ".[dev]"
 
-# 把 .pre-commit-config.yaml 落到 .git/hooks/pre-commit（新克隆后必跑一次）
 hooks:
 	$(PYTHON) -m pre_commit install
 
@@ -77,29 +67,27 @@ test:
 	$(PYTEST) $(PYTEST_ARGS)
 
 test-cov:
-	$(PYTEST) --cov=quant_baseline --cov-report=term-missing $(PYTEST_ARGS)
+	$(UV) run --with pytest --with pytest-cov python -m pytest --cov=quant_baseline --cov-report=term-missing $(PYTEST_ARGS)
 
 pre-commit:
 	$(PYTHON) -m pre_commit run --all-files
 
-init:
-	$(PYTHON) scripts/init_warehouse.py --profile $(PROFILE)
-
 check:
-	$(PYTHON) scripts/init_warehouse.py --profile $(PROFILE) --check
+	$(PYTHON) scripts/check_connections.py $(if $(PROFILE),--profile $(PROFILE),)
 
 sync:
-	$(PYTHON) scripts/sync_baseline.py --profile $(PROFILE) $(if $(BENCHMARK),--benchmark $(BENCHMARK),) $(if $(DATE),--date $(DATE),)
+	$(PYTHON) scripts/sync_baseline.py $(if $(PROFILE),--profile $(PROFILE),) \
+		$(if $(BENCHMARK),--benchmark $(BENCHMARK),) $(if $(DATE),--date $(DATE),)
 
 backfill:
-	@test -n "$(START)" || (echo "用法: make backfill START=2015-01-01 END=2024-12-31" && exit 2)
-	$(PYTHON) scripts/backfill_history.py --profile $(PROFILE) \
-		--start $(START) --end $(END) --chunk-days $(CHUNK_DAYS) \
+	@test -n "$(START)" || (echo "用法: make backfill START=2015-01-05 END=2026-11-06" && exit 2)
+	$(PYTHON) scripts/backfill_history.py $(if $(PROFILE),--profile $(PROFILE),) \
+		--start $(START) $(if $(END),--end $(END),) --chunk-days $(CHUNK_DAYS) \
 		$(if $(BENCHMARK),--benchmark $(BENCHMARK),--all)
 
 build:
 	$(UV) build
 
 clean:
-	$(PYTHON) -c "import pathlib, shutil; roots=[pathlib.Path(p) for p in ('src','scripts','tests') if pathlib.Path(p).exists()]; [shutil.rmtree(p, ignore_errors=True) for r in roots for p in r.rglob('__pycache__')]"
+	$(PYTHON) -c "import pathlib, shutil; [shutil.rmtree(p, ignore_errors=True) for r in (pathlib.Path('src'), pathlib.Path('scripts'), pathlib.Path('tests')) if r.exists() for p in r.rglob('__pycache__')]"
 	$(PYTHON) -c "import pathlib, shutil; [shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True) for p in map(pathlib.Path, ('.pytest_cache','.ruff_cache','.mypy_cache','build','dist','htmlcov','.coverage'))]"

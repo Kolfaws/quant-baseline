@@ -1,6 +1,6 @@
 [project]
 name = "quant-baseline"
-version = "0.1.0"
+version = "0.3.0"
 description = "A Python package for quantitative baseline analysis in finance and data science."
 authors = [
     { name = "Kalofaws"}
@@ -8,16 +8,13 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "duckdb>=2.0.0",
-    "matplotlib>=3.11.2",
-    "numpy>=2.5.4",
-    "pandas>=3.1.1",
     "polars>=2.1.0",
     "pre-commit>=4.7.0",
     "pyarrow>=26.0.1",
-    "scikit-learn>=1.9.1",
-    "scipy>=1.18.1",
-    "seaborn>=0.13.2",
-    "vectorbt>=1.2.0",
+    "pytz>=2026.6",
+    "pyyaml>=6.0.3",
+    "quant-data-pipeline",
+    "quant-db-schema",
 ]
 
 [project.scripts]
@@ -26,3 +23,18 @@ quant-baseline = "quant_baseline:main"
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "quant_baseline"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.pyright]
+extraPaths = ["src"]
+
+[tool.uv.sources]
+quant-db-schema = { path = "../quant-db-schema", editable = true }
+quant-data-pipeline = { path = "../quant-data-pipeline", editable = true }

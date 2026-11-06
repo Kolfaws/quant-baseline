@@ -1,20 +1,80 @@
 """core.logger — 统一日志入口。
 
-职责:
-    1. 加载 configs/logging.yaml，展开占位符后交给 logging.config.dictConfig
-    2. 确保日志目录（默认 <项目根>/logs/）存在
-    3. 对外提供 get_logger(name) —— 返回带包名前缀的标准 Logger
-
-约定:
-    - 业务代码统一 `logger = get_logger(__name__)`，禁止直接 logging.basicConfig
-    - 重复调用 set_logger() 是幂等的（先按配置重建 handler）
-    - 不在日志里输出 Token、密码、数据库连接串
-    - 日志文件的相对路径一律相对于**项目根目录**解析，而不是当前工作目录（cwd）。
-      否则从 scripts/ 或任意目录启动时会写到别处，且目录不存在会静默丢失日志。
-    - 文件 handler 使用了 delay=true，首次写入才打开文件；因此目录必须在
-      dictConfig 之前创建好（mkdir(parents=True, exist_ok=True)）。
-
-TODO:
-    - 实现 setup_logging(level: str | None = None, config_path: Path | None = None)
-    - 实现 get_logger(name: str) -> logging.Logger
+* 读取 ``configs/logging.yaml``（标准库 dictConfig 格式）；
+* 展开 ``${VAR}`` / ``${VAR:-默认值}``；
+* 把 handler 的相对路径按**项目根目录**解析，避免从 scripts/ 启动时写错位置；
+* ``get_logger`` 统一加 ``quant_baseline.`` 前缀。
 """
+
+from __future__ import annotations
+
+import logging
+import logging.config
+import os
+from pathlib import Path
+from typing import Any
+
+from .config import PROJECT_ROOT, expand_env
+
+_DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "logging.yaml"
+_CONFIGURED = False
+
+
+def _expand(value: Any) -> Any:
+    if isinstance(value, str):
+        return expand_env(value)
+    if isinstance(value, dict):
+        return {key: _expand(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_expand(item) for item in value]
+    return value
+
+
+def setup_logging(
+    level: str | None = None, config_path: Path | str | None = None
+) -> None:
+    """按 logging.yaml 初始化日志；重复调用幂等。"""
+    global _CONFIGURED
+    path = Path(config_path) if config_path is not None else _DEFAULT_CONFIG
+    if not path.is_file():
+        logging.basicConfig(
+            level=getattr(
+                logging, (level or os.getenv("LOG_LEVEL", "INFO")).upper(), logging.INFO
+            ),
+            format="%(asctime)s %(levelname)-8s | %(name)s - %(message)s",
+        )
+        _CONFIGURED = True
+        return
+
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover
+        logging.basicConfig(level=logging.INFO)
+        return
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    config = _expand(raw)
+    for handler in config.get("handlers", {}).values():
+        filename = handler.get("filename")
+        if not filename:
+            continue
+        target = Path(filename)
+        if not target.is_absolute():
+            target = PROJECT_ROOT / target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        handler["filename"] = str(target)
+
+    logging.config.dictConfig(config)
+    _CONFIGURED = True
+    if level:
+        logging.getLogger("quant_baseline").setLevel(level.upper())
+
+
+def get_logger(name: str) -> logging.Logger:
+    """返回 ``quant_baseline.*`` 命名空间下的 logger。"""
+    if name.startswith("quant_baseline"):
+        return logging.getLogger(name)
+    return logging.getLogger(f"quant_baseline.{name}")
+
+
+__all__ = ["get_logger", "setup_logging"]

@@ -1,234 +1,211 @@
-# API Reference —— 核心类与方法说明
+# API Reference — quant_baseline
 
-> **状态**：接口草案（`v0.1.0`）。当前仓库仅有占位实现，函数签名以本文件为准。正式落地后如有调整，需同步更新。
+> 状态：`v0.1.0` 已实现。以下签名与当前代码一致；变更需同步 README 与
+> `docs/db_schema.md`。
 
-本文档定义 `quant_baseline` 的对外接口。内部实现细节（如 SQL 拼接、网络分页、重试机制）不在接口约束范围内。
+## 1. 配置 `quant_baseline.core.config`
 
-## 1. 配置层 `quant_baseline.core.config`
+```python
+load_settings(config_dir: Path | str | None = None,
+              profile: str | None = None) -> Settings
+```
 
-### `load_settings(config_dir: Path | None = None) -> Settings`
+读取 `configs/baseline.yaml` + `configs/database.yaml`，展开 `${ENV}` 占位符，
+严格校验未知字段/枚举/日期。失败抛 `ConfigError`。
 
-加载并校验全部配置。
+`Settings` 字段：
 
-| 参数 | 类型 | 默认 | 说明 |
-| --- | --- | --- | --- |
-| `config_dir` | `Path \| None` | `None` | 配置文件目录；`None` 时使用项目根目录下的 `configs/` |
-
-**返回**：不可变对象 `Settings`，包含三个子配置：
-
-- `settings.baseline`：`BaselineConfig`（universes / benchmarks / sync）
-- `settings.database`：`DatabaseConfig`（active_profile / profiles / sink / schema）
-- `settings.logging`：`LoggingConfig`（YAML 原始映射 + 已解析的 level）
-
-**异常**：`ConfigError`。触发条件包括文件缺失、YAML 语法错误、存在未知字段、枚举值非法或环境变量未定义。
-
-**约定**：
-
-- 校验是严格的（`extra="forbid"`），字段名拼写错误会直接报错，不会静默使用默认值。
-- 结果支持缓存。测试中通过 `config_dir` 注入临时目录，避免污染真实配置。
-
-### 核心模型定义
-
-| 模型 | 关键字段 | 校验规则 |
+| 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `Settings` | `baseline`, `database`, `logging`, `env` | 三者版本号必须一致 |
-| `BaselineConfig` | `version`, `defaults`, `universes`, `benchmarks`, `sync` | `code` 全局唯一；`kind` 与必填字段匹配 |
-| `UniverseConfig` | `code`, `name`, `members`, `constituents_source` | `static` 必须有 `members`；`dynamic` 必须有 `constituents_source` |
-| `BenchmarkConfig` | `code`, `kind`, `symbol` / `universe`, `weight`, `rebalance` | `external` 必须有 `symbol`；`synthetic` 必须有 `universe` 且该标的池存在 |
-| `SyncConfig` | `start_date`, `end_date`, `incremental_lookback_days`, `chunk_days` | `start <= end`；`chunk_days > 0` |
+| `baseline` | `BaselineConfig` | 默认值、标的池、基准、同步区间 |
+| `database` | `ProfileConfig` | market/backtest 路径、只读开关、资源 |
+| `sink` | `SinkConfig` | 表名、幂等键、批大小、写后校验 |
+| `config_dir` | `Path` | 配置目录 |
 
-## 2. 基础设施 `quant_baseline.core`
+关键子模型：
 
-### `setup_logging(level: str | None = None, config_path: Path | None = None) -> None`
+| 模型 | 字段 |
+| --- | --- |
+| `DefaultsConfig` | `calendar, price_field, adjust, missing_policy, base_date, base_value, rebalance, weight, warmup_days` |
+| `UniverseConfig` | `code, name, members, constituents_source`；`is_dynamic` |
+| `BenchmarkConfig` | `code, name, kind, category, symbol, universe, adjust, weight, rebalance, base_date, base_value, is_active` |
+| `ProfileConfig` | `name, market_db_path, backtest_db_path, market_read_only, threads, memory_limit, temp_dir` |
+| `SinkConfig` | `table, conflict_keys, batch_size, verify_after_write, table_keys` |
 
-基于 `configs/logging.yaml` 初始化日志系统。`level` 可用于临时覆盖控制台级别。该方法幂等。
+`BaselineConfig` 方法：`benchmark(code)`、`universe(code)`、`enabled_benchmarks()`。
 
-### `get_logger(name: str) -> logging.Logger`
-
-获取 `quant_baseline` 命名空间下的 logger，业务代码需统一使用此方法获取日志句柄。
-
-### 异常体系 `quant_baseline.core.exceptions`
-
-```text
-QuantBaselineError(Exception)
-├── ConfigError      配置缺失 / 非法 / 校验失败
-├── FetchError       数据获取失败（网络、限流、Token失效、空数据）
-├── ProcessError     清洗/加权失败（列缺失、日期未对齐、除零、权重和不为1）
-├── DBWriteError     落库失败（约束冲突、事务回滚）
-└── SchemaError      仓库结构与 db_schema.md 不一致
-```
-
-所有异常均携带 `context: dict[str, Any]`（如 `benchmark_code`、`trade_date`、`table`），`__str__` 方法会输出消息及上下文，便于单行日志定位。
-
-## 3. 数据源层 `quant_baseline.sources`
-
-### `class AbstractSource(ABC)`
-
-| 方法 | 签名 | 返回 |
-| --- | --- | --- |
-| `fetch_trade_calendar` | `(start: date, end: date)` | `DataFrame[cal_date, is_open]` |
-| `fetch_index_daily` | `(symbol: str, start: date, end: date)` | `DataFrame[trade_date, open, high, low, close, volume, amount]` |
-| `fetch_etf_daily` | `(symbol: str, start: date, end: date)` | 同上 |
-| `fetch_stock_daily` | `(symbols: list[str], start: date, end: date)` | `DataFrame[symbol, trade_date, ...]` |
-| `fetch_adj_factor` | `(symbols: list[str], start: date, end: date)` | `DataFrame[symbol, trade_date, adj_factor]` |
-| `fetch_daily_basic` | `(symbols: list[str], start: date, end: date)` | `DataFrame[symbol, trade_date, total_mv, circ_mv, ...]` |
-| `fetch_index_weight` | `(index_code: str, trade_date: date)` | `DataFrame[symbol, weight]` |
-
-**实现约定**：
-
-- 返回的列名必须与 `db_schema.md` 中的 `fact_*` 字段（小写下划线）对齐，禁止在 Source 层重命名。
-- 查无数据时，返回包含列名的空 DataFrame，不抛异常（由调用方决定如何处理）。
-- 底层异常（HTTP 错误、超时、Token 失效）需统一包装为 `FetchError` 抛出。
-- 初始化时不建立网络连接。Token 从 `TUSHARE_TOKEN` 读取，禁止在日志中打印。
-
-### 数据源实现
+## 2. 连接 `quant_baseline.core.db`
 
 ```python
-TushareSource(token: str | None = None, rate_limit: RateLimit | None = None)
+connect_market(profile: ProfileConfig) -> duckdb.DuckDBPyConnection   # 强制 read_only
+connect_backtest(profile: ProfileConfig) -> duckdb.DuckDBPyConnection
+
+market_connection(profile)    # contextmanager
+backtest_connection(profile)  # contextmanager
 ```
 
-`token=None` 时读取环境变量。缺失 token 时立即抛出 `ConfigError`（快速失败）。
+连接器复用 `data_pipeline.db.connect`。`market_read_only=false` 会抛 `ConfigError`。
+
+## 3. 数据源 `quant_baseline.sources.warehouse_source`
 
 ```python
-AkShareSource(rate_limit: RateLimit | None = None)
+WarehouseSource(con)
+
+verify_schema() -> None
+trading_days(start, end, calendar="SSE") -> list[date]
+latest_trade_date(calendar="SSE", as_of=None) -> date | None
+stock_daily(symbols: tuple[str, ...], start, end) -> pl.DataFrame
+index_daily(index_code, start, end) -> pl.DataFrame
+fund_daily(fund_code, start, end) -> pl.DataFrame
+index_weights(index_code, start, end) -> pl.DataFrame
+index_snapshot_dates(index_code) -> list[date]
+table_exists(name) / table_row_count(name)
 ```
 
-可选依赖。未安装 `akshare` 时抛出 `ConfigError`，并提示安装命令 `pip install -e ".[akshare]"`。接口定义与 `TushareSource` 完全一致，可无缝替换。
+返回列：
 
-## 4. 处理层 `quant_baseline.processors`
+- `stock_daily`：`symbol, trade_date, close, pre_close, pct_chg, adj_factor, total_mv, circ_mv`
+- `index_daily` / `fund_daily`：`symbol, trade_date, close, pre_close, pct_chg`
+- `index_weights`：`trade_date, con_code, weight`
 
-### 4.1 `cleaner`
+无数据抛 `FetchError`；表缺失抛 `SchemaError`。
+
+## 4. 处理器 `quant_baseline.processors`
+
+### cleaner
 
 ```python
-clean(df: pd.DataFrame, *, table: str, keys: list[str], missing_policy: str = "drop") -> pd.DataFrame
+clean_daily(frame, *, table="daily", missing_policy="drop") -> pl.DataFrame
 ```
 
-执行顺序：去重 -> 类型规整 -> 缺失处理 -> 异常值标记 -> 按 schema 裁剪列。
+去重、类型规整、丢弃 `close<=0`；`forward_fill` 只填充市值/复权因子。
 
-- **去重**：按 `keys` 排序，保留最后一条。
-- **类型规整**：`trade_date` 转为 date，价格转为 float。无法转换的行会剔除并计数。
-- **缺失处理**：`drop` 删除整行；`forward_fill` 前向填充。若关键列全空，抛出 `ProcessError`。
-- **异常值**：如 `close<=0`、`high<low`、涨跌幅越界。仅打上 `is_invalid` 标记，不静默丢弃。
-- **列裁剪**：只保留 schema 定义的列。缺列抛 `ProcessError`；多列根据 `strict_columns` 配置决定是否报错。
-
-### 4.2 `adjuster`
+### adjuster
 
 ```python
-adjust(df: pd.DataFrame, factor: pd.DataFrame, mode: Literal["none", "qfq", "hfq"], base_date: date | None = None) -> pd.DataFrame
-align_calendar(df: pd.DataFrame, calendar: pd.DataFrame, fill: Literal["mark", "drop"] = "mark") -> pd.DataFrame
-rebase(series: pd.Series, base_date: date, base_value: float = 1000.0) -> pd.Series
+compute_returns(frame, mode="pct_chg") -> pl.DataFrame
 ```
 
-- `hfq`（后复权）：`price * factor(t) / factor(base_date)`；`qfq`（前复权）使用最新因子归一。
-- `align_calendar`：将成分序列对齐至统一交易日历。缺失日标记 `is_suspended=True`，不填充价格。
-- `rebase`：确保 `series[base_date] == base_value`，否则抛出 `ProcessError`。
+`mode ∈ {pct_chg, hfq, qfq, none}`；输出 `ret_1d`、`close_adj`。
+异常收益（`|ret|>100%`、NaN）抛 `ProcessError`。
 
-### 4.3 `weight_calc`
+### weight_calc
 
 ```python
-compute_weights(prices: pd.DataFrame, method: Literal["equal", "market_cap", "fixed"], *, members: pd.DataFrame, market_cap: pd.DataFrame | None = None, rebalance: RebalanceRule, lag: int = 1) -> pd.DataFrame
+DayPoint(ret, close, market_value)
+MembershipSnapshot(trade_date, weights)
+MembershipTimeline(*, static_members=None, snapshots=None)
+    .at(day) -> dict[str, float | None]
+
+build_panel(frame, *, market_cap_field="total_mv") -> dict[date, dict[str, DayPoint]]
+rebalance_dates(calendar, frequency, align="first_trading_day") -> set[date]
+target_weights(*, members, method, panel, reference_day, available, market_cap_field)
+
+build_synthetic_benchmark(
+    panel, calendar, *, base_date, base_value, frequency, align,
+    method, timeline, market_cap_field="total_mv", lag=1, label="benchmark"
+) -> tuple[pl.DataFrame, pl.DataFrame]
+
+build_external_series(frame, *, base_date, label="benchmark") -> pl.DataFrame
 ```
 
-返回字段：`trade_date, symbol, weight, target_weight, is_rebalance_date`。
+`build_synthetic_benchmark` 返回：
+
+- levels：`trade_date, close, ret_1d, nav`
+- weights：`trade_date, symbol, weight, target_weight, price, market_value, is_rebalance_date`
+
+约束：base_date 点位等于 base_value；每日权重和 =1；目标权重只用 `T-lag` 数据。
+
+## 5. 写入 `quant_baseline.sinks.backtest_sink`
 
 ```python
-compute_index_level(prices: pd.DataFrame, weights: pd.DataFrame, *, base_date: date, base_value: float = 1000.0) -> pd.DataFrame
+BacktestSink(con, settings: SinkConfig)
+
+verify_ready() -> None
+table_exists(name) -> bool
+write(table, frame, *, conflict_keys=None) -> WriteResult
+
+WriteResult(table: str, rows_written: int)
 ```
 
-返回字段：`trade_date, close, pct_chg`，需与 `fact_benchmark_daily` 字段对齐。
-
-**计算约束（务必保证）**：
-
-1. 每日权重之和为 1（容差 `< 1e-8`），否则抛 `ProcessError`。
-2. 严禁使用未来数据：`t` 日权重仅能基于 `t-1` 及之前的数据计算。
-3. 停牌成分当日收益按 0 处理，并重新归一化权重。
-4. 基准日点位必须严格等于 `base_value`。
-
-## 5. 落库层 `quant_baseline.sinks`
-
-### `class AbstractSink(ABC)`
-
-```python
-write(table: str, df: pd.DataFrame, *, conflict_keys: list[str] | None = None) -> WriteResult
-exists(table: str) -> bool
-row_count(table: str, where: str | None = None) -> int
-```
-
-`WriteResult`：`dataclass(rows_written: int, rows_skipped: int, table: str)`。
-
-### `class WarehouseSink(AbstractSink)`
-
-```python
-WarehouseSink(con: DuckDBPyConnection | sqlite3.Connection, *, settings: SinkConfig, schema: dict[str, TableSpec])
-```
-
-- 数据库连接由调用方管理，Sink 内部**不**关闭连接。
-- `write` 方法内按 `settings.batch_size` 分批提交，单批为一个事务，失败整体回滚并抛 `DBWriteError`。
-- `upsert_mode` 决定 SQL 形态（`on_conflict` / `delete_insert` / `append`）。
-- `strict_columns=True` 时，DataFrame 若包含表结构外的列，直接抛 `DBWriteError`。
+只允许写 `bt_benchmarks` / `bt_baselines` / `bt_baseline_weights` / `bt_compute_log`。
+未知列、缺主键列、非白名单表抛 `DBWriteError`；每批一个事务；
+`verify_after_write` 时做全表主键唯一性检查。
 
 ## 6. 主流程 `quant_baseline.pipeline`
 
-### `class BaselinePipeline`
-
 ```python
-BaselinePipeline(source: AbstractSource, sink: AbstractSink, settings: Settings)
+BaselinePipeline(source: WarehouseSource, sink: BacktestSink, settings: Settings)
 
-run(benchmark_code: str, start: date | None = None, end: date | None = None) -> RunReport
-run_all(trade_date: date | None = None, *, dry_run: bool = False) -> list[RunReport]
+run(benchmark_id, start=None, end=None) -> RunReport
+run_all(trade_date=None) -> list[RunReport]
+
+RunReport(run_id, benchmark_id, start, end, status,
+          rows_written, elapsed_s, error)
 ```
 
-`RunReport`：`dataclass(run_id, benchmark_code, start, end, status, rows_written, elapsed_s, error)`。
+`run`：
 
-**执行顺序（针对 synthetic 基准）**：
+1. 解析配置、确定区间与 run_id；
+2. 从 `base_date - warmup_days` 读交易历与行情；
+3. external：指数/ETF → `build_external_series`；
+   synthetic：成分 → 清洗 → 收益 → `build_synthetic_benchmark`；
+4. 先写 `bt_benchmarks`，再写 `bt_baselines` / `bt_baseline_weights`；
+5. 成功/失败都写 `bt_compute_log`。
 
-1. 解析基准、标的池及当日有效成分。
-2. 取数：`fetch_stock_daily` + `fetch_adj_factor` + `fetch_daily_basic`。
-3. 清洗加工：`cleaner.clean` -> `adjuster.adjust` -> `adjuster.align_calendar`。
-4. 计算：`weight_calc.compute_weights` -> `compute_index_level`。
-5. 落库：`fact_constituent_daily` -> `fact_benchmark_weight` -> `fact_benchmark_daily`。
-6. 记录水位与日志：更新 `meta_sync_state`，写入 `etl_run_log`。
+`run_all` 跳过 `enabled=false`，单基准异常不影响其他基准。
 
-**幂等性**：同一参数（`benchmark_code, start, end`）重复执行，`fact_*` 表行数不变。`meta_sync_state` 与 `etl_run_log` 会追加新记录（符合日志表预期）。
+## 7. 日志与异常
 
-**错误隔离**：`run_all` 中单个基准失败不影响其他基准。错误信息捕获至 `RunReport.error`，整体状态标记为 `partial`。
+```python
+setup_logging(level=None, config_path=None) -> None
+get_logger(name) -> logging.Logger
+```
 
-## 7. 脚本入口（CLI）
+异常层级：
 
-| 脚本 | 作用 | 主要参数 |
+```text
+QuantBaselineError(RuntimeError)
+├── ConfigError(ValueError)
+├── FetchError
+├── ProcessError
+├── DBWriteError
+└── SchemaError
+```
+
+每个异常携带 `context: dict`，`str(exc)` 会附带上下文。
+
+## 8. CLI
+
+| 脚本 | 参数 | 作用 |
 | --- | --- | --- |
-| `scripts/init_warehouse.py` | 建表 / 建索引 / 校验结构 | `--profile` `--db` `--check` `--force` |
-| `scripts/sync_baseline.py` | 日常增量同步 | `--benchmark` `--date` `--dry-run` `--profile` |
-| `scripts/backfill_history.py` | 历史区间回补 | `--benchmark` `--universe` `--all` `--start` `--end` `--chunk-days` |
+| `sync_baseline.py` | `--benchmark --date --profile --dry-run --log-level` | 增量同步；首次自动全量 |
+| `backfill_history.py` | `--benchmark`(可重复) `--all --start --end --chunk-days --profile` | 分片回补 |
+| `check_connections.py` | `--profile` | 只读检查两库结构/版本/行数 |
 
-**退出码**：`0` 成功；`1` 业务或数据库异常；`2` 配置或参数非法。
-三个脚本均支持 `--log-level` 参数，默认读取 `LOG_LEVEL` 环境变量。
+退出码：`0` 成功；`1` 业务/数据库异常；`2` 配置或参数非法（argparse）。
 
-## 8. 使用示例（目标形态）
+## 9. 示例
 
 ```python
 from datetime import date
-import duckdb
 
 from quant_baseline.core.config import load_settings
+from quant_baseline.core.db import backtest_connection, market_connection
 from quant_baseline.core.logger import setup_logging
-from quant_baseline.sinks.warehouse_sink import WarehouseSink
-from quant_baseline.sources.tushare_source import TushareSource
 from quant_baseline.pipeline import BaselinePipeline
+from quant_baseline.sinks.backtest_sink import BacktestSink
+from quant_baseline.sources.warehouse_source import WarehouseSource
 
 setup_logging()
 settings = load_settings()
 
-con = duckdb.connect(settings.database.profile().path)
-source = TushareSource()
-sink = WarehouseSink(con, settings=settings.database.sink)
-
-pipeline = BaselinePipeline(source, sink, settings)
-report = pipeline.run("BI_EQW_CORE", start=date(2024, 1, 1), end=date(2024, 6, 30))
-print(report.status, report.rows_written)
+with market_connection(settings.database) as market_con:
+    source = WarehouseSource(market_con)
+    source.verify_schema()
+    with backtest_connection(settings.database) as backtest_con:
+        sink = BacktestSink(backtest_con, settings.sink)
+        pipeline = BaselinePipeline(source, sink, settings)
+        report = pipeline.run("BI_EQW_CORE", end=date(2026, 11, 5))
+        print(report.status, report.rows_written)
 ```
-
-> 注：当前各方法尚未完全实现，以上代码为目标调用形态。
-
----
-END OF FILE
