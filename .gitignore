@@ -22,10 +22,6 @@ data/**
 !data/processed/
 !data/**/.gitkeep
 
-# warehouse/ 只保留目录本身；baseline.db 由 init_warehouse.py 生成
-warehouse/**
-!warehouse/
-!warehouse/.gitkeep
 
 # 各类数据文件（防止在 data/ 之外误提交）
 *.parquet
@@ -106,7 +102,6 @@ desktop.ini
 *.swo
 *~
 .ipynb_checkpoints/
-.ruff_cache/
 
 # ------------------------------------------------------------------ 7. 临时文件
 *.tmp

@@ -1,12 +1,11 @@
-"""sinks — 数据持久化层。
+"""sinks — 把计算结果幂等写入 backtest.duckdb。
 
-本层只负责“把规整好的 DataFrame 按约定写进 warehouse”，不做任何业务计算。
+本层不建表：
 
-子模块:
-    base.py             AbstractSink —— 写入契约
-    warehouse_sink.py   多表 upsert 实现（DuckDB / SQLite）
-
-依赖方向: sinks 可依赖 core，不能 import sources / processors。
+    backtest_sink.BacktestSink
+        只允许写 bt_benchmarks / bt_baselines / bt_baseline_weights / bt_compute_log
 """
 
-__all__: list[str] = []
+from .backtest_sink import BacktestSink, WriteResult
+
+__all__ = ["BacktestSink", "WriteResult"]

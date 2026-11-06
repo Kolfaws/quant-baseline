@@ -1,77 +1,50 @@
 # =============================================================================
-# database.yaml — warehouse 连接与写入配置
+# database.yaml — 统一数据底座的连接与写入约定
 #
 # 设计：
-#   - profiles 下声明多套连接，active_profile 决定当前使用哪套（本地/远端切换）
-#   - 敏感信息不写在这里，用 ${ENV_VAR} 占位，由 .env / 系统环境变量注入
-#   - sink 段是“写入约定”，与 driver 无关，WarehouseSink 统一遵守
+#   - market.duckdb   由 data_pipeline 维护；quant-baseline 只读打开
+#   - backtest.duckdb 由 quant-backtest-engine 建表；quant-baseline 只 upsert
+#   - 本项目不建表，不创建独立 baseline.db / SQLite 备选库
 #
-# 占位符语法：${VAR} 或 ${VAR:-默认值}，加载时展开；未定义且无默认值则报错。
+# 占位符：${VAR}，必须由环境变量 / .env 提供；不在 YAML 中写死机器路径。
 # =============================================================================
 
 version: 1
 
-# 当前启用的档案；环境变量 BASELINE_DB_PROFILE 优先于此处
-active_profile: local
+active_profile: production
 
-# ------------------------------------------------------------------ 连接档案 --
 profiles:
-  # 本地开发：单文件 DuckDB，读写皆可
-  local:
-    driver: duckdb
-    path: "${BASELINE_DB_PATH:-warehouse/baseline.db}"
-    read_only: false
-    threads: 4               # DuckDB 并行度，建议 <= 物理核数
-    memory_limit: 4GB        # 形如 512MB / 4GB / 16GB，不允许中间空格
-    temp_dir: null           # 溢写目录；null = 使用系统临时目录
-
-  # 远端：只读查询远端仓库（分析/回测场景），写入请走 local 或专用写入任务
-  remote:
-    driver: duckdb
-    path: "${BASELINE_DB_REMOTE_PATH}"
-    read_only: true
-    threads: 8
-    memory_limit: 8GB
+  production:
+    market_db_path: "${MARKET_DB_PATH}"
+    backtest_db_path: "${BACKTEST_DB_PATH}"
+    market_read_only: true       # 必须只读：data_pipeline / factor 可能在写
+    threads: 6
+    memory_limit: 6GB
     temp_dir: null
 
-  # 备选：SQLite 单文件（轻量、跨平台；适合小数据量或做对照验证）
-  sqlite:
-    driver: sqlite
-    path: "${BASELINE_DB_PATH:-warehouse/baseline.db}"
-    read_only: false
-    timeout_seconds: 30      # 写锁等待超时
+  research:
+    market_db_path: "${MARKET_DB_PATH}"
+    backtest_db_path: "${BACKTEST_DB_PATH}"
+    market_read_only: true
+    threads: 4
+    memory_limit: 4GB
+    temp_dir: null
 
 # ------------------------------------------------------------------ 会话级 --
 session:
-  timezone: Asia/Shanghai    # 交易日/时间戳解释所用时区
-  auto_commit: false         # 由 sink 显式提交，保证批量写的事务边界
-  lock_wait_seconds: 30      # 跨进程单写者：拿不到写锁时的等待上限
+  timezone: Asia/Shanghai
+  lock_wait_seconds: 30
 
 # ------------------------------------------------------------------ 写入约定 --
 sink:
-  schema: main               # DuckDB schema；SQLite 忽略此字段
-  table_prefix: ""           # 多项目共库时的表名前缀，如 "baseline_"
-  batch_size: 20000          # 单批 upsert 行数，过大易撑爆内存
-  upsert_mode: on_conflict   # on_conflict | delete_insert | append
-  on_conflict_action: update # update | ignore（冲突时更新 or 跳过）
-  strict_columns: true       # true = 出现表结构外的列直接失败，防止静默丢字段
-  verify_after_write: true   # 写入后校验行数与主键唯一性
-  # 幂等键：与 docs/db_schema.md 中的主键保持一致，勿单独修改
-  conflict_keys:
-    meta_schema_version: [component]
-    dim_benchmark: [benchmark_code]
-    dim_universe: [universe_code]
-    dim_universe_member: [universe_code, symbol, start_date]
-    fact_benchmark_daily: [benchmark_code, trade_date]
-    fact_constituent_daily: [universe_code, symbol, trade_date]
-    fact_benchmark_weight: [benchmark_code, trade_date, symbol]
-    etl_run_log: [run_id]
-    meta_sync_state: [job_name, target_key]
+  table: "bt_baselines"                    # 基准点位主表
+  conflict_keys: ["benchmark_id", "trade_date"]
+  batch_size: 10000
+  verify_after_write: true
 
-# ------------------------------------------------------------------ 结构版本 --
-# 与 docs/db_schema.md 同步维护；init_warehouse.py 写入 meta_schema_version
-schema:
-  component: warehouse
-  version: "0.1.0"
-  # 结构变更时追加迁移说明，便于回溯
-  migrations: []
+  # 其余表的主键；表名与字段名来自 quant_schema.constants
+  tables:
+    bt_benchmarks: ["benchmark_id"]
+    bt_baselines: ["benchmark_id", "trade_date"]
+    bt_baseline_weights: ["benchmark_id", "trade_date", "symbol"]
+    bt_compute_log: ["run_id"]
