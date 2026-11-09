@@ -106,6 +106,10 @@ sink:
 - `market_read_only` 必须为 `true`；设成 false 会直接 `ConfigError`。
 - `sink.conflict_keys` 必须与 `bt_baselines` 主键一致，否则启动即失败。
 - 路径不允许写死；必须由 `${MARKET_DB_PATH}` / `${BACKTEST_DB_PATH}` 提供（环境变量优先于 `.env`）。
+- 测试库 profile `test` 使用 `${MARKET_TEST_DB_PATH}` / `${BACKTEST_TEST_DB_PATH}`：
+  ```bash
+  uv run python scripts/sync_baseline.py --profile test
+  ```
 
 ### `configs/baseline.yaml`
 
