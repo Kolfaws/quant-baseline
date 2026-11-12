@@ -41,6 +41,7 @@ quant-baseline/
 │   ├── database.yaml             # market + backtest 路径、sink 约定
 │   └── logging.yaml
 ├── docs/
+│   ├── README.md                 # 按需阅读索引
 │   ├── db_schema.md              # 本项目在 backtest.duckdb 中读写的表
 │   └── api_reference.md          # 已实现 API
 ├── scripts/
@@ -193,7 +194,8 @@ Makefile：`make sync` / `make backfill START=... END=...` / `make check` / `mak
 | `bt_compute_log` | `run_id` | 成功/失败日志 |
 
 失败时也会写一条 `status='failed'` 的 `bt_compute_log`，异常继续上抛。
-详见 [docs/db_schema.md](docs/db_schema.md)。
+详见 [docs/db_schema.md](docs/db_schema.md)；文档索引见
+[docs/README.md](docs/README.md)。
 
 ## 8. 测试
 
