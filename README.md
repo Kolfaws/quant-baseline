@@ -1,5 +1,11 @@
 # Quant Baseline
 
+## Overview
+
+Quant Baseline builds investable benchmarks from the shared market database and writes them into backtest.duckdb.
+It supports equal-weight, market-cap-weight, and external index/ETF benchmarks with point-in-time rebalancing rules.
+The component is read-only on market data and never creates schemas or fetches raw market data.
+
 回测基准（benchmark）计算组件：从统一数据底座读行情，按等权 / 市值加权 / 外部指数
 规则合成基准，产出直接写入 `backtest.duckdb`。
 
