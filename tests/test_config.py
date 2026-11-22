@@ -75,3 +75,17 @@ def test_profile_selection(tmp_path: Path) -> None:
     _copy_configs(tmp_path)
     settings = load_settings(tmp_path, profile="research")
     assert settings.database.name == "research"
+
+
+def test_weight_lag_zero_rejected(tmp_path: Path) -> None:
+    """lag=0 允许 T 日市值定 T 日权重，配置层直接拒绝（旧行为 minimum=0）。"""
+    _copy_configs(tmp_path)
+    path = tmp_path / "baseline.yaml"
+    text = path.read_text(encoding="utf-8")
+    marker = "field: total_mv\n      lag: 1"
+    assert marker in text
+    path.write_text(
+        text.replace(marker, "field: total_mv\n      lag: 0", 1), encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="lag"):
+        load_settings(tmp_path)

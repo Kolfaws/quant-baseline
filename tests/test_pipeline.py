@@ -166,6 +166,69 @@ def test_dynamic_universe(market_db, backtest_db, settings_factory) -> None:
     assert report.rows_written == 7 + 14
 
 
+def test_dynamic_universe_uses_reference_day_snapshot(
+    market_db, backtest_db, settings_factory
+) -> None:
+    """动态池再平衡用参考日（T-1）成分快照。
+
+    market 库有 01-02 与 02-01 两期指数权重。02-01 排定再平衡时参考日是
+    01-31，只能看到 01-02 快照（0.4/0.6），不能预支 02-01 才可见的
+    0.5/0.5；旧实现用 T 日快照，会把 02-01 快照直接用于 02-01 定权。
+    """
+    universe = UniverseConfig(
+        code="UNI_DYN",
+        name="动态池",
+        description=None,
+        members=(),
+        constituents_source=ConstituentsSourceConfig(
+            kind="warehouse",
+            api="index_weight",
+            index_code="000300.SH",
+            refresh="monthly",
+            lookback_days=45,
+        ),
+    )
+    benchmark = BenchmarkConfig(
+        code="BI_DYN_FIXED",
+        name="动态固定权重",
+        kind="synthetic",
+        category="basket",
+        symbol=None,
+        universe="UNI_DYN",
+        price_field="close",
+        adjust="pct_chg",
+        weight=WeightRule("fixed", "total_mv", 1),
+        rebalance=RebalanceRule("monthly", "first_trading_day"),
+        base_date=date(2024, 1, 2),
+        base_value=1000.0,
+        is_active=True,
+    )
+    settings = settings_factory(benchmarks=[benchmark], universes={"UNI_DYN": universe})
+    report = _run(settings, "BI_DYN_FIXED", end=date(2024, 2, 1))
+    assert report.status == "success"
+
+    con = duckdb.connect(str(backtest_db), read_only=True)
+    try:
+        rows = con.execute(
+            "SELECT trade_date, symbol, target_weight FROM bt_baseline_weights "
+            "WHERE benchmark_id = 'BI_DYN_FIXED' AND is_rebalance_date "
+            "ORDER BY trade_date, symbol"
+        ).fetchall()
+    finally:
+        con.close()
+    by_day: dict[date, dict[str, float]] = {}
+    for day, symbol, target in rows:
+        by_day.setdefault(day, {})[symbol] = float(target)
+    # 基准日 01-02：01-02 快照 0.4/0.6
+    assert by_day[date(2024, 1, 2)] == pytest.approx(
+        {"600000.SH": 0.4, "600001.SH": 0.6}
+    )
+    # 02-01：参考日 01-31 -> 仍是 01-02 快照，不能预支 02-01 快照的 0.5/0.5
+    assert by_day[date(2024, 2, 1)] == pytest.approx(
+        {"600000.SH": 0.4, "600001.SH": 0.6}
+    )
+
+
 def test_failure_writes_failed_log(market_db, backtest_db, settings_factory) -> None:
     settings = settings_factory(benchmarks=[_external("BI_MISSING", "999999.SH")])
     with pytest.raises(FetchError):

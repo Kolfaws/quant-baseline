@@ -14,8 +14,8 @@
 
 `market.duckdb` 内有两个组件：
 
-- `warehouse`（`component='warehouse'`，v1.2.0）：行情基础表；
-- `factor`（`component='factor'`，v1.1.0）：因子表与验证元数据。
+- `warehouse`（`component='warehouse'`，v1.3.0）：行情基础表；
+- `factor`（`component='factor'`，v1.2.0）：因子表与验证元数据。
 
 本项目只读 warehouse 部分，不关心 factor 表。
 
@@ -171,8 +171,8 @@ ORDER BY trade_date;
 
 | 库 | 组件 | 版本 |
 | --- | --- | --- |
-| market.duckdb | warehouse | 1.2.0 |
-| market.duckdb | factor | 1.1.0 |
+| market.duckdb | warehouse | 1.3.0 |
+| market.duckdb | factor | 1.2.0 |
 | backtest.duckdb | backtest | 1.0.0 |
 
 `check_connections.py` 会打印两个库的实际版本与表行数。
