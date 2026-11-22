@@ -34,6 +34,9 @@ load_settings(config_dir: Path | str | None = None,
 
 `BaselineConfig` 方法：`benchmark(code)`、`universe(code)`、`enabled_benchmarks()`。
 
+`WeightRule`：`method` / `field` / `lag`；`lag >= 1`（默认 1），`lag=0` 在配置
+层直接 `ConfigError`，`build_synthetic_benchmark` 入口也会拒绝。
+
 ## 2. 连接 `quant_baseline.core.db`
 
 ```python
@@ -95,7 +98,7 @@ compute_returns(frame, mode="pct_chg") -> pl.DataFrame
 DayPoint(ret, close, market_value)
 MembershipSnapshot(trade_date, weights)
 MembershipTimeline(*, static_members=None, snapshots=None)
-    .at(day) -> dict[str, float | None]
+    .at(reference_day) -> dict[str, float | None]   # PIT：快照日 <= reference_day
 
 build_panel(frame, *, market_cap_field="total_mv") -> dict[date, dict[str, DayPoint]]
 rebalance_dates(calendar, frequency, align="first_trading_day") -> set[date]
@@ -114,7 +117,10 @@ build_external_series(frame, *, base_date, label="benchmark") -> pl.DataFrame
 - levels：`trade_date, close, ret_1d, nav`
 - weights：`trade_date, symbol, weight, target_weight, price, market_value, is_rebalance_date`
 
-约束：base_date 点位等于 base_value；每日权重和 =1；目标权重只用 `T-lag` 数据。
+约束：`lag >= 1`（默认 1，`lag=0` 抛 `ProcessError`）；base_date 点位等于
+base_value；每日权重和 =1；目标权重与动态成分快照都只用参考日（`T-lag`）及
+更早数据，equal / fixed 的 `available` 是参考日可见集合（未来上市 / 已退市 /
+参考日停牌成分不纳入）。
 
 ## 5. 写入 `quant_baseline.sinks.backtest_sink`
 

@@ -2,13 +2,19 @@
 
 关键约定（防止前视 / 保证可复现）：
 
-1. **T 日收益使用 T 日前已确定的权重**；再平衡日的目标权重只用 ``T-lag``
-   及更早的市值计算（``lag`` 默认 1）。
-2. **基准日** ``base_date`` 的点位严格等于 ``base_value``，当日收益记 0。
-3. **停牌 / 缺失**：当日收益按 0 处理，权重保留并在组合内自然漂移；
+1. **T 日收益使用 T 日前已确定的权重**；再平衡日用 T-lag 及更早的数据定权
+   （``lag >= 1``，默认 1，禁止为 0）。
+2. **动态成分快照同样按参考日（T-lag）取**：``MembershipTimeline.at(reference_day)``，
+   快照日不得晚于参考日；T 日才生效的成分不会进入 T 日目标权重。
+3. **``available`` 是参考日可见集合**：只有参考日有行情的成分才进入
+   equal / fixed 目标权重，未来上市 / 已退市 / 参考日停牌的成分被剔除。
+4. **基准日** ``base_date`` 的点位严格等于 ``base_value``，当日收益记 0。
+   若日历在基准日前没有交易日（warmup 不足），基准日初始权重退回用当日数据，
+   因当日收益记 0、组合从次日起承担收益，不构成收益前视。
+5. **停牌 / 缺失**：当日收益按 0 处理，权重保留并在组合内自然漂移；
    不对价格做前向填充。
-4. **成分进出池**：成员集合变化当日强制再平衡，避免“已退市成分仍占权重”。
-5. 每日权重和恒为 1（容差 1e-9），否则 ``ProcessError``。
+6. **成分进出池**：成员集合变化当日强制再平衡，避免“已退市成分仍占权重”。
+7. 每日权重和恒为 1（容差 1e-9），否则 ``ProcessError``。
 
 本模块不查库、不写库，只接收 polars DataFrame 与配置对象。
 """
@@ -77,6 +83,11 @@ class MembershipTimeline:
         self._snapshot_dates = [item.trade_date for item in self._snapshots]
 
     def at(self, day: date) -> dict[str, float | None]:
+        """返回 ``day`` 当日可见的成分权重（快照日 <= ``day``，PIT）。
+
+        调用方在再平衡日必须传参考日（T-lag），不能传 T 日，否则会选中
+        T 日才生效的成分快照，形成前视。
+        """
         if self._static:
             return {
                 member.symbol: member.in_weight
@@ -86,7 +97,14 @@ class MembershipTimeline:
         index = bisect_right(self._snapshot_dates, day) - 1
         if index < 0:
             return {}
-        return dict(self._snapshots[index].weights)
+        snapshot = self._snapshots[index]
+        if snapshot.trade_date > day:  # 防御性 PIT 断言；bisect 已保证 <= day
+            raise ProcessError(
+                f"成分快照日 {snapshot.trade_date} 晚于参考日 {day}",
+                snapshot_date=str(snapshot.trade_date),
+                reference_day=str(day),
+            )
+        return dict(snapshot.weights)
 
     @property
     def snapshot_dates(self) -> tuple[date, ...]:
@@ -170,7 +188,11 @@ def target_weights(
     market_cap_field: str = "total_mv",
     panel_dates: list[date] | None = None,
 ) -> dict[str, float]:
-    """计算某个再平衡日的目标权重；不满足数据的成分会被剔除。"""
+    """计算某个再平衡日的目标权重；不满足数据的成分会被剔除。
+
+    ``members`` 必须是参考日（T-lag）可见的成分；``available`` 必须是参考日
+    有行情的 symbol 集合（不是全样本集合），equal / fixed 只纳入其中成分。
+    """
     if not members:
         return {}
     points = panel.get(reference_day, {})
@@ -247,6 +269,9 @@ def build_synthetic_benchmark(
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """构建合成基准点位与每日权重。
 
+    ``lag`` 必须 >= 1：再平衡目标权重只用 T-lag 及更早的数据；动态成分快照
+    同样按参考日（T-lag）取，且只纳入参考日有行情的成分。
+
     Returns:
         ``(levels, weights)``；levels 字段为 trade_date/close/ret_1d/nav，
         weights 字段为 trade_date/symbol/weight/target_weight/price/market_value/is_rebalance_date。
@@ -255,6 +280,11 @@ def build_synthetic_benchmark(
         raise ProcessError(f"{label} 交易日历为空")
     if base_value <= 0:
         raise ProcessError(f"{label} base_value 必须 > 0")
+    if lag < 1:
+        raise ProcessError(
+            f"{label} weight.lag 必须 >= 1（收到 {lag}）；T 日权重只能用 T-lag 及更早数据",
+            lag=lag,
+        )
 
     full_calendar = sorted(set(calendar))
     start_index = next(
@@ -265,7 +295,6 @@ def build_synthetic_benchmark(
     start_date = full_calendar[start_index]
 
     schedule = rebalance_dates(full_calendar, frequency, align)
-    available = {symbol for day_points in panel.values() for symbol in day_points}
     panel_dates = sorted(panel)
 
     levels: list[tuple[date, float, float, float]] = []
@@ -276,13 +305,38 @@ def build_synthetic_benchmark(
 
     for index in range(start_index, len(full_calendar)):
         day = full_calendar[index]
-        members = timeline.at(day)
+        # 参考日 = T-lag；lag >= 1 且 max(0, ...) 保证 reference_day <= day。
+        reference_day = full_calendar[max(0, index - lag)]
+        if index - lag < 0:
+            if reference_day == day:
+                # 仅基准日（日历首日即基准日）会退化到当日数据；当日收益记 0，
+                # 组合从次日起承担收益，因此不构成收益前视。
+                LOG.warning(
+                    "%s 基准日 %s 之前没有交易日（warmup 不足），"
+                    "初始目标权重使用基准日当天数据；当日收益记 0，不构成收益前视",
+                    label,
+                    day,
+                )
+            else:
+                # 日历早于基准日的交易日不足 lag 天：用日历内最早交易日，
+                # 早于 T-lag，仍满足 PIT。
+                LOG.warning(
+                    "%s %s 距日历首日不足 lag=%d 个交易日，参考日退回 %s（早于 T-lag，PIT 安全）",
+                    label,
+                    day,
+                    lag,
+                    reference_day,
+                )
+        # PIT：成分快照按参考日（T-lag）取，T 日才生效的成分不进入 T 日目标权重。
+        members = timeline.at(reference_day)
         member_changed = set(members) != set(previous_members)
         is_rebalance = index == start_index or day in schedule or member_changed
         target: dict[str, float] = {}
 
         if is_rebalance:
-            reference_day = full_calendar[max(0, index - lag)]
+            # PIT：可用集是参考日可见集合，不是全样本集合；未来上市 / 已退市 /
+            # 参考日停牌的成分不进入 equal / fixed 目标权重。
+            available = set(panel.get(reference_day, {}))
             target = target_weights(
                 members=members,
                 method=method,

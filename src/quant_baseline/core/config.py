@@ -348,7 +348,8 @@ def _parse_weight(
     field = block.get("field", base.field)
     if field not in {"total_mv", "circ_mv"}:
         raise ConfigError(f"{path}.field 必须是 total_mv / circ_mv，收到 {field!r}")
-    lag = _int(block.get("lag", base.lag), f"{path}.lag", minimum=0)
+    # lag >= 1：T 日再平衡目标权重只能用 T-1 及更早的市值/成分，禁止用 T 日数据定 T 日权重。
+    lag = _int(block.get("lag", base.lag), f"{path}.lag", minimum=1)
     return WeightRule(method=method, field=str(field), lag=lag)
 
 

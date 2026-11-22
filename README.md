@@ -1,11 +1,5 @@
 # Quant Baseline
 
-## Overview
-
-Quant Baseline builds investable benchmarks from the shared market database and writes them into backtest.duckdb.
-It supports equal-weight, market-cap-weight, and external index/ETF benchmarks with point-in-time rebalancing rules.
-The component is read-only on market data and never creates schemas or fetches raw market data.
-
 回测基准（benchmark）计算组件：从统一数据底座读行情，按等权 / 市值加权 / 外部指数
 规则合成基准，产出直接写入 `backtest.duckdb`。
 
@@ -32,7 +26,7 @@ quant-backtest-engine 建表 ─> ${BACKTEST_DB_PATH}
 关键点：
 
 - **单一数据底座**：`market.duckdb` + `backtest.duckdb`，没有第三个库。
-- **读写隔离**：`market.duckdb` 以 `read_only=True` 打开；factor_research 写因子时，
+- **读写隔离**：`market.duckdb` 以 `read_only=True` 打开；quant-factor 写因子时，
   回测/基准仍可并发读（DuckDB 单写多读）。
 - **不重复抓数**：基准用的指数、成分、个股价量都已在 market 库中；抓数由
   `data_pipeline/scripts/ingest_market_data.py` 负责。
@@ -151,8 +145,8 @@ uv run python scripts/sync_baseline.py
 # 指定基准
 uv run python scripts/sync_baseline.py --benchmark BI_HS300
 
-# 历史回补（按 365 天分片，幂等，可断点重跑）
-uv run python scripts/backfill_history.py --all --start 2015-01-05 --end 2026-11-06
+# 历史回补（按 365 天分片，幂等，可断点重跑）；当前库仅 2010，扩范围需另建版本
+uv run python scripts/backfill_history.py --all --start 2010-01-04 --end 2010-12-31
 
 # 只检查两个库的结构/版本/行数，不写库
 uv run python scripts/check_connections.py
@@ -172,15 +166,21 @@ Makefile：`make sync` / `make backfill START=... END=...` / `make check` / `mak
 ### 6.2 合成基准
 
 1. `base_date` 当日点位 = `base_value`（严格相等），当日收益记 0。
-2. 再平衡日目标权重：
-   - `equal`：等权，剔除无行情的成分；
-   - `market_cap`：用 `T-lag` 市值归一（默认 lag=1，避免前视）；
-   - `fixed`：用成员/指数权重归一。
+2. 再平衡日目标权重只用参考日（`T-lag`）及更早数据，`lag >= 1`（默认 1；
+   `lag: 0` 会被配置校验拒绝）：
+   - `equal`：等权，只纳入参考日有行情的成分；
+   - `market_cap`：用 `T-lag` 市值归一；
+   - `fixed`：用成员/指数权重归一，同样只纳入参考日有行情的成分。
+   - 动态成分池：成分快照按参考日取，快照日不得晚于参考日；T 日才生效的
+     成分不会进入 T 日目标权重。
 3. 非再平衡日权重随价格漂移：
    `w_i(t) = w_i(t-1) * (1 + r_i(t)) / Σ_j w_j(t-1) * (1 + r_j(t))`。
 4. 停牌/缺失：当日收益按 0，权重保留；不填充价格。
-5. 成分进出池：成员集合变化当日强制再平衡。
+5. 成分进出池：参考日可见的成员集合变化当日强制再平衡；未来上市 / 已退市 /
+   参考日停牌的成分不进入 `equal` / `fixed` 定权。
 6. 每日 `Σw = 1`（容差 1e-9），否则 `ProcessError`，不写库。
+7. 若日历在基准日前没有交易日（`warmup_days` 不足），基准日初始权重退回用
+   当日数据并打 WARNING（当日收益记 0，组合从次日起承担收益，不构成收益前视）。
 
 ### 6.3 外部基准
 
